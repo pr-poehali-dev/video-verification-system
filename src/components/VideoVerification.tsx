@@ -1,8 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { CheckCircle, AlertCircle, Video, RotateCcw } from "lucide-react";
+import { CheckCircle, AlertCircle, Video, RotateCcw, Camera } from "lucide-react";
 
-type VerificationStep = "ready" | "recording" | "processing" | "success" | "error";
+type VerificationStep = "ready" | "scanning" | "processing" | "success" | "error";
 
 interface VideoVerificationProps {
   isFirstLogin: boolean;
@@ -12,95 +12,120 @@ interface VideoVerificationProps {
 const VideoVerification = ({ isFirstLogin, onVerificationComplete }: VideoVerificationProps) => {
   const [step, setStep] = useState<VerificationStep>("ready");
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [timeLeft, setTimeLeft] = useState<number>(7);
-  const [facingDirection, setFacingDirection] = useState<string>("прямо");
+  const [faceDetected, setFaceDetected] = useState<boolean>(false);
+  const [scanProgress, setScanProgress] = useState<number>(0);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const recordingRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const scanTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const faceCheckTimerRef = useRef<NodeJS.Timeout | null>(null);
   
-  const directions = ["прямо", "влево", "вправо", "вверх"];
-  
+  // Очистка ресурсов при размонтировании компонента
   useEffect(() => {
-    if (step === "recording") {
-      const timer = setInterval(() => {
-        setTimeLeft((prev) => {
-          if (prev <= 1) {
-            clearInterval(timer);
-            stopRecording();
-            return 0;
-          }
-          
-          // Меняем направление каждые 2 секунды
-          if (prev % 2 === 0) {
-            const dirIndex = Math.floor((7 - prev) / 2);
-            if (dirIndex < directions.length) {
-              setFacingDirection(directions[dirIndex]);
-            }
-          }
-          
-          return prev - 1;
-        });
-      }, 1000);
-      
-      return () => clearInterval(timer);
+    return () => {
+      stopAllTimers();
+      stopCamera();
+    };
+  }, []);
+
+  // Эффект для автоматического начала сканирования при обнаружении лица
+  useEffect(() => {
+    if (step === "scanning" && faceDetected && scanProgress === 0) {
+      // Как только лицо обнаружено, начинаем процесс сканирования
+      startScanningProcess();
     }
-  }, [step]);
-  
+  }, [step, faceDetected]);
+
+  // Функция начала сканирования
+  const startScanningProcess = () => {
+    setScanProgress(0);
+    scanTimerRef.current = setInterval(() => {
+      setScanProgress((prev) => {
+        const next = prev + 5;
+        if (next >= 100) {
+          // Сканирование завершено, переходим к обработке
+          stopAllTimers();
+          setStep("processing");
+          processVerification();
+          return 100;
+        }
+        return next;
+      });
+    }, 100); // Быстрый прогресс для лучшего UX
+  };
+
+  // Остановка всех таймеров
+  const stopAllTimers = () => {
+    if (scanTimerRef.current) {
+      clearInterval(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
+    if (faceCheckTimerRef.current) {
+      clearInterval(faceCheckTimerRef.current);
+      faceCheckTimerRef.current = null;
+    }
+  };
+
+  // Функция для запуска камеры и начала процесса сканирования
+  const startScanning = async () => {
+    const hasPermission = await requestCameraPermission();
+    if (!hasPermission) return;
+    
+    setStep("scanning");
+    setFaceDetected(false);
+    setScanProgress(0);
+    
+    // Имитация проверки наличия лица в кадре
+    faceCheckTimerRef.current = setInterval(() => {
+      // В реальном приложении здесь был бы алгоритм обнаружения лица
+      // Имитируем обнаружение лица через случайное время (0.5-2 секунды)
+      if (Math.random() > 0.7 && !faceDetected) {
+        setFaceDetected(true);
+      }
+    }, 300);
+  };
+
+  // Запрос доступа к камере
   const requestCameraPermission = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: "user",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        } 
+      });
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
       }
       return true;
     } catch (err) {
+      console.error("Ошибка доступа к камере:", err);
       setErrorMessage("Не удалось получить доступ к камере. Пожалуйста, проверьте разрешения.");
       setStep("error");
       return false;
     }
   };
-  
-  const startRecording = async () => {
-    const hasPermission = await requestCameraPermission();
-    if (!hasPermission) return;
-    
-    setStep("recording");
-    setTimeLeft(7);
-    setFacingDirection("прямо");
-    chunksRef.current = [];
-    
-    const mediaRecorder = new MediaRecorder(streamRef.current as MediaStream);
-    recordingRef.current = mediaRecorder;
-    
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) {
-        chunksRef.current.push(e.data);
-      }
-    };
-    
-    mediaRecorder.onstop = () => {
-      // Здесь моделируем отправку и обработку записи
-      processRecording();
-    };
-    
-    mediaRecorder.start();
-  };
-  
-  const stopRecording = () => {
-    if (recordingRef.current && recordingRef.current.state !== "inactive") {
-      recordingRef.current.stop();
-      setStep("processing");
+
+  // Остановка работы камеры
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
   };
-  
-  const processRecording = () => {
-    // Моделируем обработку на сервере
+
+  // Обработка результатов сканирования
+  const processVerification = () => {
+    // Имитация обработки на сервере
     setTimeout(() => {
-      // Симуляция ответа от сервера
-      const success = Math.random() > 0.3; // 70% вероятность успеха для демонстрации
+      // Для демонстрации: 70% вероятность успеха
+      const success = Math.random() > 0.3;
       
       if (success) {
         setStep("success");
@@ -110,7 +135,7 @@ const VideoVerification = ({ isFirstLogin, onVerificationComplete }: VideoVerifi
         
         // Симуляция различных ошибок
         const errorTypes = [
-          "Не удалось распознать лицо. Пожалуйста, обеспечьте хорошее освещение и повторите попытку.",
+          "Не удалось распознать лицо. Пожалуйста, убедитесь в хорошем освещении и повторите попытку.",
           "Этот биометрический отпечаток уже зарегистрирован на другом аккаунте (телефон +7 XXX XXX-XX-XX). Доступ заблокирован.",
           "Не удалось подтвердить, что это живой человек. Повторите попытку."
         ];
@@ -119,25 +144,26 @@ const VideoVerification = ({ isFirstLogin, onVerificationComplete }: VideoVerifi
         setErrorMessage(selectedError);
         onVerificationComplete(false, selectedError);
       }
-    }, 3000);
+      
+      // Остановка камеры после завершения
+      stopCamera();
+    }, 2000);
   };
-  
+
+  // Сброс состояния при повторной попытке
   const resetVerification = () => {
     setStep("ready");
     setErrorMessage("");
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
+    setFaceDetected(false);
+    setScanProgress(0);
+    stopAllTimers();
+    stopCamera();
   };
   
   return (
     <div className="bg-white rounded-lg shadow-md p-6 max-w-md mx-auto">
       <h2 className="text-xl font-semibold mb-4 text-center">
-        {isFirstLogin ? "Первичная видео-верификация" : "Видео-верификация"}
+        {isFirstLogin ? "Первичная верификация лица" : "Верификация лица"}
       </h2>
       
       {step === "ready" && (
@@ -145,24 +171,24 @@ const VideoVerification = ({ isFirstLogin, onVerificationComplete }: VideoVerifi
           <div className="mb-6 text-gray-600">
             <p className="mb-4">
               {isFirstLogin 
-                ? "Для защиты вашей учетной записи нам нужно записать короткое видео с вашим лицом."
-                : "Пожалуйста, пройдите видео-верификацию для подтверждения личности."}
+                ? "Для защиты вашей учетной записи нам нужно сканировать ваше лицо."
+                : "Пожалуйста, пройдите сканирование лица для подтверждения личности."}
             </p>
             <p className="mb-4">
-              Пожалуйста, следуйте указаниям на экране и поворачивайте голову в запрашиваемом направлении.
+              Посмотрите прямо в камеру и не двигайтесь, пока система сканирует ваше лицо.
             </p>
           </div>
           <Button
-            onClick={startRecording}
+            onClick={startScanning}
             className="flex items-center gap-2"
           >
-            <Video size={18} />
-            Начать запись
+            <Camera size={18} />
+            Начать сканирование
           </Button>
         </div>
       )}
       
-      {(step === "recording" || step === "processing") && (
+      {step === "scanning" && (
         <div className="text-center">
           <div className="relative rounded-lg overflow-hidden mb-4 bg-gray-100 aspect-video">
             <video
@@ -173,35 +199,48 @@ const VideoVerification = ({ isFirstLogin, onVerificationComplete }: VideoVerifi
               className="w-full h-full object-cover"
             />
             
-            {step === "recording" && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/30 text-white">
-                <div className="text-4xl font-bold mb-2">{timeLeft}</div>
-                <div className="text-xl mb-1">Поверните голову:</div>
-                <div className="text-2xl font-bold">{facingDirection.toUpperCase()}</div>
-              </div>
-            )}
-            
-            {step === "processing" && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-white">
-                <div className="flex flex-col items-center">
-                  <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
-                  <div className="text-xl">Обработка...</div>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              {!faceDetected ? (
+                <div className="text-center p-4 bg-black/30 rounded-lg text-white">
+                  <div className="mb-2">Поиск лица в кадре...</div>
+                  <div className="text-sm">Посмотрите прямо в камеру</div>
                 </div>
-              </div>
-            )}
+              ) : (
+                <div className="text-center p-4 bg-black/30 rounded-lg text-white w-3/4">
+                  <div className="mb-2">Лицо обнаружено! Сканирование...</div>
+                  <div className="h-2 bg-gray-300 rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-primary transition-all duration-100"
+                      style={{ width: `${scanProgress}%` }}
+                    ></div>
+                  </div>
+                  <div className="text-sm mt-2">Не двигайтесь, пожалуйста</div>
+                </div>
+              )}
+            </div>
           </div>
           
-          {step === "recording" && (
-            <p className="text-sm text-gray-500 mb-4">
-              Следуйте инструкциям и поворачивайте голову в указанном направлении
-            </p>
-          )}
+          <p className="text-sm text-gray-500 mb-4">
+            {!faceDetected 
+              ? "Пожалуйста, убедитесь, что ваше лицо хорошо видно и освещено"
+              : "Система сканирует ваше лицо. Пожалуйста, не двигайтесь"
+            }
+          </p>
+        </div>
+      )}
+      
+      {step === "processing" && (
+        <div className="text-center">
+          <div className="relative rounded-lg overflow-hidden mb-4 bg-gray-100 aspect-video flex items-center justify-center">
+            <div className="flex flex-col items-center">
+              <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
+              <div className="text-xl">Обработка...</div>
+            </div>
+          </div>
           
-          {step === "processing" && (
-            <p className="text-sm text-gray-500 mb-4">
-              Пожалуйста, подождите. Мы проверяем запись...
-            </p>
-          )}
+          <p className="text-sm text-gray-500 mb-4">
+            Пожалуйста, подождите. Мы проверяем ваши биометрические данные...
+          </p>
         </div>
       )}
       
